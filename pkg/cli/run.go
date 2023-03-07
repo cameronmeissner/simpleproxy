@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/base64"
 	"log"
 	"net/http"
 	"os"
@@ -52,7 +51,7 @@ func runProxy(cmd *cobra.Command, args []string) {
 		errs <- http.ListenAndServe(opts.httpAddr, proxy)
 	}()
 	go func() {
-		errs <- http.ListenAndServe(opts.httpsAddr, proxy)
+		errs <- http.ListenAndServeTLS(opts.httpsAddr, opts.certPath, opts.keyPath, proxy)
 	}()
 
 	select {
@@ -64,19 +63,11 @@ func runProxy(cmd *cobra.Command, args []string) {
 }
 
 func loadCACertAndPrivateKey(certPath, keyPath string) error {
-	cert, err := os.ReadFile(certPath)
+	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return err
 	}
-	certPEM, err := base64.StdEncoding.DecodeString(string(cert))
-	if err != nil {
-		return err
-	}
-	key, err := os.ReadFile(keyPath)
-	if err != nil {
-		return err
-	}
-	keyPEM, err := base64.StdEncoding.DecodeString(string(key))
+	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
 		return err
 	}
