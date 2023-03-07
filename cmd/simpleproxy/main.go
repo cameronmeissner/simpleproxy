@@ -1,11 +1,9 @@
 package main
 
 import (
-	"github.com/elazarl/goproxy"
-	"log"
-	"net/http"
+	"github.com/cameronmeissner/simpleproxy/pkg/cli"
 )
 
 func main() {
-	
+	cli.Execute()
 }

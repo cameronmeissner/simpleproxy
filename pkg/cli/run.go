@@ -1,88 +1,82 @@
 package cli
 
 import (
-	"github.com/spf13/cobra"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"log"
-	"flag"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/elazarl/goproxy"
+	"github.com/spf13/cobra"
 )
 
-type runOpts struct {
-	verbose string
-	cacert []byte
-	caKey []byte
-	httpAddr string
-	httpsAddr string
-}
-
-func (opts *runOpts) customCAConfigured() bool {
-	return opts.cacert != "" && opts.cakey != ""
-}
-
 var runCmd = &cobra.Command{
-	Use: "run",
+	Use:   "run",
 	Short: "run simpleproxy on specified ports",
-	Long: "run simpleproxy on specified HTTP and HTTPS ports, optionally with a custom CA certificate & private key",
-	Run: runProxy,
-}
-
-func init() {
-	rootCmd.Flags()
+	Long:  "run simpleproxy on specified HTTP and HTTPS ports, optionally with a custom CA certificate & private key",
+	Run:   runProxy,
 }
 
 func runProxy(cmd *cobra.Command, args []string) {
-	opts := createRunOpts()
-	if opts.verbose {
-		log.Printf("simpleproxy will listen on http address: %q, https address: %q", opts.httpAddr, opts.httpsAddr)
-	}
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+
+	// setup signal handling to cancel the context
+	go func() {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGTERM)
+		<-signals
+		log.Println("received SIGTERM. Terminating...")
+		shutdown()
+	}()
+
+	log.Printf("simpleproxy will listen on http address: %q, https address: %q", opts.httpAddr, opts.httpsAddr)
 	if opts.customCAConfigured() {
-		if opts.verbose {
-			log.Printf("using custom CA certificate in %q and custom CA private key in %q", opts.cacert, opts.cakey)
-		}
-		if err := loadCACertAndPrivateKey(opts.cacert, opts.cakey); err != nil {
-			panic(err)
+		log.Printf("using custom CA certificate in %q and custom CA private key in %q", opts.certPath, opts.keyPath)
+		if err := loadCACertAndPrivateKey(opts.certPath, opts.keyPath); err != nil {
+			log.Fatal(ctx, err.Error())
 		}
 	}
 
+	errs := make(chan error)
 	proxy := goproxy.NewProxyHttpServer()
-	proxy.Verbose = verbose
-	errChannel := make(chan error)
+	proxy.Verbose = opts.verbose
 
+	// run an instance of the proxy on both specified ports
 	go func() {
-		err := http.ListenAndServe(opts.httpAddr, proxy)
-		errChannel <- err
+		errs <- http.ListenAndServe(opts.httpAddr, proxy)
 	}()
 	go func() {
-		err := http.ListenAndServe(opts.httpsAddr, proxy)
-		errChannel <- err
+		errs <- http.ListenAndServe(opts.httpsAddr, proxy)
 	}()
 
-	err := <-errChannel
-	log.Fatal(err)
-}
-
-func createRunOpts() *runOpts {
-	verbose := runCmd.Flags().BoolVarP("v", false, "should every proxy request be logged to stdout")
-	cacert := runCmd.Flags().StringVarP("cacert", "", "path to base64-encoded CA cert in PEM format")
-	cakey := flag.String("cakey", "", "path to base64-encoded CA private key in PEM format")
-	httpAddr := flag.String("httpaddr", ":3129", "proxy http listen address")
-	httpsAddr := flag.String("httpsaddr", ":3128", "proxy https listen address")
-	flag.Parse()
-
-	return &runOpts{
-		verbose: *verbose,
-		cacert: *cacert,
-		cakey: *cakey,
-		httpAddr: *httpAddr,
-		httpsAddr: *httpsAddr,
+	select {
+	case <-ctx.Done():
+		return
+	case err := <-errs:
+		log.Fatal(ctx, err.Error())
 	}
 }
 
 func loadCACertAndPrivateKey(certPath, keyPath string) error {
-	certPEM, err := os.ReadFile(certPath)
+	cert, err := os.ReadFile(certPath)
 	if err != nil {
 		return err
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	certPEM, err := base64.StdEncoding.DecodeString(string(cert))
+	if err != nil {
+		return err
+	}
+	key, err := os.ReadFile(keyPath)
+	if err != nil {
+		return err
+	}
+	keyPEM, err := base64.StdEncoding.DecodeString(string(key))
 	if err != nil {
 		return err
 	}
@@ -93,10 +87,15 @@ func loadCACertAndPrivateKey(certPath, keyPath string) error {
 	if ca.Leaf, err = x509.ParseCertificate(ca.Certificate[0]); err != nil {
 		return err
 	}
-	goproxy.GoproxyCa = ca
-	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
-	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
-	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
-	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(&ca)}
+
+	injectCustomCA(&ca)
 	return nil
+}
+
+func injectCustomCA(ca *tls.Certificate) {
+	goproxy.GoproxyCa = *ca
+	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: goproxy.TLSConfigFromCA(ca)}
+	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: goproxy.TLSConfigFromCA(ca)}
 }
